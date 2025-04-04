@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useContext, useRef } from "react";
 import { UserContext } from "../context/user.context";
 import { useNavigate, useLocation } from "react-router-dom";
-import axios from "../config/axios";
+import axiosInstance from "../config/axios";
 import {
   initializeSocket,
   receiveMessage,
@@ -28,13 +28,18 @@ function SyntaxHighlightedCode(props) {
 
 const Project = () => {
   const location = useLocation();
+  const navigate = useNavigate();
+
+  // Get projectId from URL query params to maintain state across refreshes
+  const queryParams = new URLSearchParams(location.search);
+  const projectIdFromUrl = queryParams.get("id");
 
   const [isSidePanelOpen, setIsSidePanelOpen] = useState(false);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [selectedUserId, setSelectedUserId] = useState(new Set());
   const [project, setProject] = useState(location.state?.project || {});
   const [message, setMessage] = useState("");
-  const { user } = useContext(UserContext);
+  const { user, setUser } = useContext(UserContext);
   const messageBox = useRef(null);
 
   const [users, setUsers] = useState([]);
@@ -51,6 +56,7 @@ const Project = () => {
   const [isLoading, setIsLoading] = useState(false);
   const [containerStatus, setContainerStatus] = useState("Not started");
   const [statusMessage, setStatusMessage] = useState("");
+  const [projectLoading, setProjectLoading] = useState(true);
 
   // Function to extract and process file tree from AI messages
   const processAiMessage = (message) => {
@@ -243,15 +249,85 @@ const Project = () => {
     });
   };
 
+  // Load project data - this is a critical function to ensure persistence
+  const loadProjectData = async (projectId) => {
+    try {
+      setProjectLoading(true);
+      const response = await axiosInstance.get(
+        `/projects/get-project/${projectId}`
+      );
+      console.log("Project data loaded:", response.data.project);
+
+      // Update project in state
+      setProject(response.data.project);
+
+      // Update URL if needed to include project ID
+      if (!projectIdFromUrl) {
+        navigate(`/project?id=${projectId}`, {
+          replace: true,
+          state: { project: response.data.project },
+        });
+      }
+
+      // Store the file tree and log it for debugging
+      const projectFileTree = response.data.project.fileTree || {};
+      console.log("Initial file tree:", projectFileTree);
+      setFileTree(projectFileTree);
+
+      // If file tree is not empty and WebContainer is ready, mount it
+      if (Object.keys(projectFileTree).length > 0 && webContainer) {
+        mountFileTreeToContainer(webContainer, projectFileTree);
+      }
+
+      return response.data.project;
+    } catch (err) {
+      console.error("Failed to fetch project:", err);
+      if (err.response && err.response.status === 401) {
+        // Handle authentication error without redirecting
+        // This allows the component to try re-authenticating
+        const token = localStorage.getItem("token");
+        if (token) {
+          try {
+            // Try to refresh user data
+            const userResponse = await axiosInstance.get("/users/me");
+            setUser(userResponse.data.user);
+            // Retry loading project
+            return loadProjectData(projectId);
+          } catch (authError) {
+            console.error("Authentication failed:", authError);
+          }
+        }
+      }
+      return null;
+    } finally {
+      setProjectLoading(false);
+    }
+  };
+
   function addCollaborators() {
-    axios
+    if (!project?._id) {
+      setStatusMessage("Project not loaded properly");
+      setTimeout(() => setStatusMessage(""), 3000);
+      return;
+    }
+
+    axiosInstance
       .put("/projects/add-user", {
-        projectId: project?._id,
+        projectId: project._id,
         users: Array.from(selectedUserId),
       })
       .then((res) => {
         console.log("Collaborators added successfully:", res.data);
         setIsModalOpen(false);
+
+        // Immediately update the project state with new collaborators
+        if (res.data.project) {
+          setProject(res.data.project);
+        } else {
+          // If the API doesn't return updated project, reload it
+          loadProjectData(project._id);
+        }
+
         setStatusMessage("Collaborators added successfully");
         setTimeout(() => setStatusMessage(""), 3000);
       })
@@ -268,6 +344,7 @@ const Project = () => {
     sendMessage("project-message", {
       message,
       sender: user,
+      projectId: project._id, // Include project ID for better tracking
     });
     setMessages((prevMessages) => [...prevMessages, { sender: user, message }]);
     setMessage("");
@@ -292,7 +369,14 @@ const Project = () => {
       console.warn("Failed to parse AI message as JSON:", error);
       return (
         <div className="overflow-auto bg-slate-950 text-white rounded-sm p-2">
-          {message}
+          <Markdown
+            children={message}
+            options={{
+              overrides: {
+                code: SyntaxHighlightedCode,
+              },
+            }}
+          />
         </div>
       );
     }
@@ -340,13 +424,49 @@ const Project = () => {
     }
   };
 
-  useEffect(() => {
-    if (project?._id) {
-      // Initialize socket connection
-      initializeSocket(project._id);
+  // Determine project ID to use (from URL, state, or props)
+  const getProjectId = () => {
+    // First priority: URL parameter
+    if (projectIdFromUrl) {
+      return projectIdFromUrl;
+    }
 
-      // Initialize WebContainer
-      initializeWebContainer();
+    // Second priority: Project from location state
+    if (location.state?.project?._id) {
+      return location.state.project._id;
+    }
+
+    // Third priority: Current project state
+    if (project?._id) {
+      return project._id;
+    }
+
+    // No project ID found
+    return null;
+  };
+
+  // Main initialization effect - runs once on component mount
+  useEffect(() => {
+    const projectId = getProjectId();
+
+    if (!projectId) {
+      console.error("No project ID found");
+      navigate("/");
+      return;
+    }
+
+    // Initialize WebContainer right away
+    const containerPromise = initializeWebContainer();
+
+    // Load project data
+    loadProjectData(projectId).then((loadedProject) => {
+      if (!loadedProject) {
+        console.error("Failed to load project data");
+        return;
+      }
+
+      // Initialize socket connection
+      initializeSocket(projectId);
 
       // Set up message listener
       receiveMessage("project-message", (data) => {
@@ -363,6 +483,9 @@ const Project = () => {
 
               // Update the file tree state
               setFileTree(mergedFileTree);
+
+              // Save the updated file tree to the server
+              saveFileTree(mergedFileTree);
 
               // Try to mount the file tree if WebContainer is available
               if (webContainer) {
@@ -408,29 +531,8 @@ const Project = () => {
         }
       });
 
-      // Fetch project data
-      axios
-        .get(`/projects/get-project/${project._id}`)
-        .then((res) => {
-          console.log("Project data loaded:", res.data.project);
-          setProject(res.data.project);
-
-          // Store the file tree and log it for debugging
-          const projectFileTree = res.data.project.fileTree || {};
-          console.log("Initial file tree:", projectFileTree);
-          setFileTree(projectFileTree);
-
-          // If file tree is not empty and WebContainer is ready, mount it
-          if (Object.keys(projectFileTree).length > 0 && webContainer) {
-            mountFileTreeToContainer(webContainer, projectFileTree);
-          }
-        })
-        .catch((err) => {
-          console.error("Failed to fetch project:", err);
-        });
-
       // Fetch users
-      axios
+      axiosInstance
         .get("/users/all")
         .then((res) => {
           setUsers(res.data.users);
@@ -438,7 +540,24 @@ const Project = () => {
         .catch((err) => {
           console.error("Failed to fetch users:", err);
         });
-    }
+
+      // Set up periodic refresh of project data
+      const projectRefreshInterval = setInterval(() => {
+        // Silently refresh project data to keep it updated
+        axiosInstance
+          .get(`/projects/get-project/${projectId}`)
+          .then((res) => {
+            setProject(res.data.project);
+          })
+          .catch((err) => {
+            console.error("Failed to refresh project data:", err);
+          });
+      }, 30000); // Every 30 seconds
+
+      return () => {
+        clearInterval(projectRefreshInterval);
+      };
+    });
 
     // Cleanup function
     return () => {
@@ -450,7 +569,7 @@ const Project = () => {
         }
       }
     };
-  }, [project?._id]);
+  }, []);
 
   // Effect to mount file tree when WebContainer becomes available
   useEffect(() => {
@@ -464,7 +583,7 @@ const Project = () => {
     if (!project?._id) return;
 
     console.log("Saving file tree:", ft);
-    axios
+    axiosInstance
       .put("/projects/update-file-tree", {
         projectId: project._id,
         fileTree: ft,
@@ -498,13 +617,20 @@ const Project = () => {
     return fileTree[file].file.contents;
   };
 
+  // Improved runProject function to fix execution issues
   const runProject = async () => {
     if (!webContainer) {
       console.error("WebContainer not initialized");
+      setStatusMessage(
+        "WebContainer not initialized. Please refresh the page."
+      );
+      setTimeout(() => setStatusMessage(""), 5000);
       return;
     }
 
     setIsLoading(true);
+    setStatusMessage("Setting up project...");
+
     try {
       console.log("Running project with file tree:", fileTree);
 
@@ -515,6 +641,8 @@ const Project = () => {
       );
       if (!mountSuccess) {
         console.error("Failed to mount file tree before running");
+        setStatusMessage("Failed to mount file tree. Please try again.");
+        setTimeout(() => setStatusMessage(""), 5000);
         setIsLoading(false);
         return;
       }
@@ -528,13 +656,25 @@ const Project = () => {
       const hasPythonFile = fileNames.some((file) => file.endsWith(".py"));
       const hasPackageJson = fileNames.includes("package.json");
 
+      // Kill any existing process
+      if (runProcess) {
+        console.log("Killing existing process");
+        try {
+          await runProcess.kill();
+          setRunProcess(null);
+        } catch (err) {
+          console.error("Error killing process:", err);
+        }
+      }
+
       // Create necessary files based on project type
       if (hasHtmlFile && !fileNames.includes("server.js")) {
+        setStatusMessage("Creating server for HTML project...");
         // Create a simple server for HTML projects
         const serverCode = `
 const express = require('express');
 const app = express();
-const port = process.env.PORT || 3000;
+const port = 3000;
 
 // Middleware to parse JSON bodies
 app.use(express.json());
@@ -552,6 +692,7 @@ app.listen(port, () => {
 
       // Create package.json if it doesn't exist but is needed
       if (!hasPackageJson && (hasHtmlFile || hasJsFile)) {
+        setStatusMessage("Creating package.json...");
         const packageJson = {
           name: "web-project",
           version: "1.0.0",
@@ -579,6 +720,7 @@ app.listen(port, () => {
 
       // For Python projects
       if (hasPythonFile && !fileNames.includes("requirements.txt")) {
+        setStatusMessage("Setting up Python environment...");
         await webContainer.fs.writeFile(
           "requirements.txt",
           "# No requirements specified\n"
@@ -587,13 +729,17 @@ app.listen(port, () => {
 
       // Install dependencies based on project type
       if (hasPackageJson || hasHtmlFile || hasJsFile) {
+        setStatusMessage("Installing npm dependencies...");
         console.log("Installing npm dependencies...");
+
         const installProcess = await webContainer.spawn("npm", ["install"]);
 
-        // Log installation output
+        // Create a writable stream to capture installation output
+        const installOutput = [];
         installProcess.output.pipeTo(
           new WritableStream({
             write(chunk) {
+              installOutput.push(chunk);
               console.log("Install output:", chunk);
             },
           })
@@ -602,8 +748,17 @@ app.listen(port, () => {
         // Wait for installation to complete
         const installExitCode = await installProcess.exit;
         console.log("Installation completed with exit code:", installExitCode);
+
+        if (installExitCode !== 0) {
+          setStatusMessage(`Installation failed with code ${installExitCode}`);
+          setTimeout(() => setStatusMessage(""), 5000);
+          setIsLoading(false);
+          return;
+        }
       } else if (hasPythonFile) {
+        setStatusMessage("Installing Python dependencies...");
         console.log("Installing Python dependencies...");
+
         const pipProcess = await webContainer.spawn("pip", [
           "install",
           "-r",
@@ -611,28 +766,27 @@ app.listen(port, () => {
         ]);
 
         // Log installation output
+        const pipOutput = [];
         pipProcess.output.pipeTo(
           new WritableStream({
             write(chunk) {
+              pipOutput.push(chunk);
               console.log("Pip install output:", chunk);
             },
           })
         );
 
-        await pipProcess.exit;
-      }
-
-      // Kill any existing process
-      if (runProcess) {
-        console.log("Killing existing process");
-        try {
-          runProcess.kill();
-        } catch (err) {
-          console.error("Error killing process:", err);
+        const pipExitCode = await pipProcess.exit;
+        if (pipExitCode !== 0) {
+          setStatusMessage(`Pip installation failed with code ${pipExitCode}`);
+          setTimeout(() => setStatusMessage(""), 5000);
+          setIsLoading(false);
+          return;
         }
       }
 
       // Start the application based on project type
+      setStatusMessage("Starting application...");
       console.log("Starting application...");
       let newRunProcess;
 
@@ -643,6 +797,10 @@ app.listen(port, () => {
         newRunProcess = await webContainer.spawn("python", [mainPyFile]);
       } else {
         console.error("Unsupported project type");
+        setStatusMessage(
+          "Unsupported project type. Please add HTML, JS, or Python files."
+        );
+        setTimeout(() => setStatusMessage(""), 5000);
         setIsLoading(false);
         return;
       }
@@ -650,15 +808,23 @@ app.listen(port, () => {
       setRunProcess(newRunProcess);
 
       // Log application output
+      const appOutput = [];
       newRunProcess.output.pipeTo(
         new WritableStream({
           write(chunk) {
+            appOutput.push(chunk);
             console.log("App output:", chunk);
+
+            // Update status with latest output
+            setStatusMessage(`Running: ${chunk}`);
+            setTimeout(() => setStatusMessage(""), 3000);
           },
         })
       );
 
       console.log("Application started");
+      setStatusMessage("Application started successfully!");
+      setTimeout(() => setStatusMessage(""), 3000);
     } catch (error) {
       console.error("Error running the project:", error);
       setStatusMessage("Error running project: " + error.message);
@@ -668,6 +834,18 @@ app.listen(port, () => {
     }
   };
 
+  // Loading state while project data is being fetched
+  if (projectLoading) {
+    return (
+      <div className="flex justify-center items-center h-screen">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-blue-500 mx-auto mb-4"></div>
+          <p className="text-gray-600">Loading project...</p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <main className="h-screen w-screen flex">
       <section className="left relative flex flex-col h-screen min-w-96 bg-slate-300">
@@ -676,12 +854,15 @@ app.listen(port, () => {
             <i className="ri-add-fill mr-1"></i>
             <p>Add collaborator</p>
           </button>
-          <button
-            onClick={() => setIsSidePanelOpen(!isSidePanelOpen)}
-            className="p-2"
-          >
-            <i className="ri-group-fill"></i>
-          </button>
+          <div className="flex items-center">
+            <span className="text-sm mr-2">{project?.name || "Project"}</span>
+            <button
+              onClick={() => setIsSidePanelOpen(!isSidePanelOpen)}
+              className="p-2"
+            >
+              <i className="ri-group-fill"></i>
+            </button>
+          </div>
         </header>
         <div className="conversation-area pt-14 pb-10 flex-grow flex flex-col h-full relative">
           <div
@@ -758,7 +939,6 @@ app.listen(port, () => {
           </div>
         </div>
       </section>
-
       <section className="right bg-red-50 flex-grow h-full flex">
         <div className="explorer h-full max-w-64 min-w-52 bg-slate-200 flex flex-col">
           <div className="explorer-header p-2 flex justify-between items-center bg-slate-300">
@@ -795,9 +975,11 @@ app.listen(port, () => {
                   <button
                     onClick={() => {
                       setCurrentFile(file);
-                      setOpenFiles([...new Set([...openFiles, file])]);
+                      setOpenFiles((prev) => [...new Set([...prev, file])]);
                     }}
-                    className="tree-element cursor-pointer p-2 px-4 flex items-center gap-2 bg-slate-300 w-full text-left"
+                    className={`tree-element cursor-pointer p-2 px-4 flex items-center gap-2 w-full text-left ${
+                      currentFile === file ? "bg-slate-400" : "bg-slate-300"
+                    }`}
                   >
                     <p className="font-semibold">{file}</p>
                   </button>
@@ -833,8 +1015,8 @@ app.listen(port, () => {
                 <button
                   key={index}
                   onClick={() => setCurrentFile(file)}
-                  className={`open-file cursor-pointer p-2 px-4 flex items-center w-fit gap-2 bg-slate-300 ${
-                    currentFile === file ? "bg-slate-400" : ""
+                  className={`open-file cursor-pointer p-2 px-4 flex items-center w-fit gap-2 ${
+                    currentFile === file ? "bg-slate-400" : "bg-slate-300"
                   }`}
                 >
                   <p className="font-semibold text-lg">{file}</p>
@@ -874,8 +1056,8 @@ app.listen(port, () => {
                 className={`p-2 px-4 ${
                   isLoading || containerStatus !== "Ready"
                     ? "bg-gray-300 cursor-not-allowed"
-                    : "bg-slate-300 cursor-pointer"
-                } text-black`}
+                    : "bg-green-500 hover:bg-green-600 cursor-pointer text-white"
+                }`}
               >
                 {isLoading ? "Running..." : "Run"}
               </button>
@@ -886,7 +1068,9 @@ app.listen(port, () => {
               <div className="code-editor-area h-full overflow-auto flex-grow bg-slate-50">
                 <pre className="hljs h-full">
                   <code
-                    className="hljs h-full outline-none"
+                    className={`hljs h-full outline-none language-${getLanguageFromFilename(
+                      currentFile
+                    )}`}
                     contentEditable
                     suppressContentEditableWarning
                     onBlur={(e) => {
@@ -928,41 +1112,67 @@ app.listen(port, () => {
 
         {webContainer && (
           <div className="flex min-w-96 flex-col h-full">
-            <div className="address-bar">
-              <input
-                type="text"
-                onChange={(e) => setIframeUrl(e.target.value)}
-                value={iframeUrl || ""}
-                className="w-full p-2 px-4 bg-slate-200"
-                placeholder="URL will appear when server is ready"
-                readOnly={!iframeUrl}
-              />
-            </div>
-            {iframeUrl ? (
-              <iframe
-                src={iframeUrl}
-                className="w-full h-full"
-                title="WebContainer Preview"
-              />
-            ) : (
-              <div className="w-full h-full flex items-center justify-center bg-gray-100 text-gray-500">
-                {isLoading
-                  ? "Starting server..."
-                  : "Run the project to see preview"}
+            <div className="address-bar bg-slate-800 p-2">
+              <div className="flex items-center">
+                <input
+                  type="text"
+                  value={iframeUrl || ""}
+                  className="w-full p-2 px-4 bg-slate-200 rounded-l"
+                  placeholder="URL will appear when server is ready"
+                  readOnly
+                />
+                <button
+                  onClick={() => {
+                    if (iframeUrl) {
+                      // Create a new iframe URL with a timestamp to force refresh
+                      setIframeUrl(
+                        `${iframeUrl.split("?")[0]}?t=${Date.now()}`
+                      );
+                    }
+                  }}
+                  className="bg-slate-600 text-white p-2 px-4 rounded-r hover:bg-slate-700"
+                  disabled={!iframeUrl}
+                >
+                  <i className="ri-refresh-line"></i>
+                </button>
               </div>
-            )}
+            </div>
+            <div className="preview-container relative flex-grow">
+              {iframeUrl ? (
+                <iframe
+                  src={iframeUrl}
+                  className="w-full h-full border-none"
+                  title="WebContainer Preview"
+                  sandbox="allow-forms allow-modals allow-pointer-lock allow-popups allow-same-origin allow-scripts allow-top-navigation-by-user-activation"
+                />
+              ) : (
+                <div className="w-full h-full flex items-center justify-center bg-gray-100 text-gray-500">
+                  {isLoading
+                    ? "Starting server..."
+                    : "Run the project to see preview"}
+                </div>
+              )}
+              {isLoading && (
+                <div className="absolute inset-0 bg-black bg-opacity-30 flex items-center justify-center">
+                  <div className="bg-white p-4 rounded-md shadow-lg">
+                    <div className="animate-spin rounded-full h-8 w-8 border-t-2 border-b-2 border-blue-500 mx-auto mb-2"></div>
+                    <p className="text-sm text-center">Starting server...</p>
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
         )}
 
         {statusMessage && (
-          <div className="status-message absolute bottom-4 right-4 bg-slate-800 text-white p-2 px-4 rounded-md shadow-lg">
+          <div className="status-message fixed bottom-4 right-4 bg-slate-800 text-white p-2 px-4 rounded-md shadow-lg z-50">
             {statusMessage}
           </div>
         )}
       </section>
 
       {isModalOpen && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center">
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
           <div className="bg-white p-4 rounded-md w-96 max-w-full relative">
             <header className="flex justify-between items-center mb-4">
               <h2 className="text-xl font-semibold">Select User</h2>
@@ -971,26 +1181,37 @@ app.listen(port, () => {
               </button>
             </header>
             <div className="users-list flex flex-col gap-2 mb-16 max-h-96 overflow-auto">
-              {users.map((user, idx) => (
-                <div
-                  key={idx}
-                  className={`user cursor-pointer hover:bg-slate-200 ${
-                    Array.from(selectedUserId).indexOf(user._id) !== -1
-                      ? "bg-slate-200"
-                      : ""
-                  } p-2 flex gap-2 items-center`}
-                  onClick={() => handleUserClick(user._id)}
-                >
-                  <div className="aspect-square relative rounded-full w-fit h-fit flex items-center justify-center p-5 text-white bg-slate-600">
-                    <i className="ri-user-fill absolute"></i>
+              {users.length > 0 ? (
+                users.map((user, idx) => (
+                  <div
+                    key={idx}
+                    className={`user cursor-pointer hover:bg-slate-200 ${
+                      Array.from(selectedUserId).indexOf(user._id) !== -1
+                        ? "bg-slate-200"
+                        : ""
+                    } p-2 flex gap-2 items-center`}
+                    onClick={() => handleUserClick(user._id)}
+                  >
+                    <div className="aspect-square relative rounded-full w-fit h-fit flex items-center justify-center p-5 text-white bg-slate-600">
+                      <i className="ri-user-fill absolute"></i>
+                    </div>
+                    <h1 className="font-semibold text-lg">{user.email}</h1>
                   </div>
-                  <h1 className="font-semibold text-lg">{user.email}</h1>
+                ))
+              ) : (
+                <div className="text-center text-gray-500 py-4">
+                  No users available
                 </div>
-              ))}
+              )}
             </div>
             <button
               onClick={addCollaborators}
-              className="absolute bottom-4 left-1/2 transform -translate-x-1/2 px-4 py-2 bg-blue-600 text-white rounded-md"
+              disabled={selectedUserId.size === 0}
+              className={`absolute bottom-4 left-1/2 transform -translate-x-1/2 px-4 py-2 ${
+                selectedUserId.size === 0
+                  ? "bg-gray-400 cursor-not-allowed"
+                  : "bg-blue-600 hover:bg-blue-700"
+              } text-white rounded-md`}
             >
               Add Collaborators
             </button>
