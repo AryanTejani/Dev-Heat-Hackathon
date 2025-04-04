@@ -1,0 +1,39 @@
+/* project.css */
+.code-area code {
+    font-family: 'Fira Code', monospace;
+    tab-size: 2;
+    line-height: 1.5;
+  }
+  
+  .file-explorer .file {
+    padding-left: 8px;
+    border-left: 2px solid transparent;
+  }
+  
+  .file-explorer .file:hover {
+    border-left: 2px solid #60a5fa;
+  }
+  
+  .tabs .tab {
+    border-right: 1px solid rgba(255,255,255,0.1);
+  }
+  
+  /* For the line numbers */
+  .code-area pre {
+    counter-reset: line;
+  }
+  
+  .code-area code {
+    counter-increment: line;
+    position: relative;
+  }
+  
+  .code-area code::before {
+    content: counter(line);
+    position: absolute;
+    left: -2rem;
+    width: 1.5rem;
+    color: #6b7280;
+    text-align: right;
+  }
+  
