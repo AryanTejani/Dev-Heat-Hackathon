@@ -11,19 +11,46 @@ import Markdown from "markdown-to-jsx";
 import hljs from "highlight.js";
 import { getWebContainer } from "../config/webcontainer";
 
+// Enhanced SyntaxHighlightedCode component
 function SyntaxHighlightedCode(props) {
   const ref = useRef(null);
+  const [language, setLanguage] = useState(
+    props.className?.replace("lang-", "") || "plaintext"
+  );
 
   React.useEffect(() => {
-    if (ref.current && props.className?.includes("lang-") && window.hljs) {
-      window.hljs.highlightElement(ref.current);
+    if (ref.current) {
+      // Update language based on props
+      const langClass = props.className?.match(/lang-(\w+)/);
+      const newLang = langClass ? langClass[1] : "plaintext";
+      setLanguage(newLang);
+
+      // Try to highlight with the detected language
+      try {
+        window.hljs.highlightElement(ref.current);
+      } catch (e) {
+        console.warn("Highlighting failed:", e);
+      }
 
       // hljs won't reprocess the element unless this attribute is removed
       ref.current.removeAttribute("data-highlighted");
     }
   }, [props.className, props.children]);
 
-  return <code {...props} ref={ref} />;
+  return (
+    <div className="relative group">
+      <div className="absolute top-0 right-0 bg-slate-700 text-xs text-white px-2 py-1 rounded-bl opacity-70">
+        {language}
+      </div>
+      <pre className="bg-slate-800 p-3 rounded overflow-auto">
+        <code
+          {...props}
+          ref={ref}
+          className={`${props.className || ""} hljs`}
+        />
+      </pre>
+    </div>
+  );
 }
 
 const Project = () => {
@@ -59,25 +86,125 @@ const Project = () => {
   const [statusMessage, setStatusMessage] = useState("");
   const [projectLoading, setProjectLoading] = useState(true);
 
+  // New state for terminal output
+  const [terminalOutput, setTerminalOutput] = useState([]);
+  const [showTerminal, setShowTerminal] = useState(false);
+  const terminalRef = useRef(null);
+
   // Function to extract and process file tree from AI messages
+  // Enhanced processAiMessage function for better file extraction
   const processAiMessage = (message) => {
     try {
       // Try to parse the message as JSON
       let parsedData;
       try {
-        parsedData = JSON.parse(message);
+        // Try to find complete JSON in the message
+        const jsonRegex = /{[\s\S]*}/g;
+        const jsonMatches = message.match(jsonRegex);
+
+        if (jsonMatches && jsonMatches.length > 0) {
+          parsedData = JSON.parse(jsonMatches[0]);
+        } else {
+          parsedData = JSON.parse(message);
+        }
       } catch (error) {
-        console.log("Message is not valid JSON, treating as plain text");
+        console.log("Message is not valid JSON, trying to extract code blocks");
+
+        // Try to extract code blocks with language markers
+        const codeBlockRegex = /```(\w+)?\s*([\s\S]*?)```/g;
+        let match;
+        let newFileTree = {};
+
+        while ((match = codeBlockRegex.exec(message)) !== null) {
+          const language = match[1] || "txt";
+          const code = match[2];
+
+          // Generate filename based on language
+          let filename;
+          switch (language.toLowerCase()) {
+            case "python":
+            case "py":
+              filename = "main.py";
+              break;
+            case "javascript":
+            case "js":
+              filename = "script.js";
+              break;
+            case "html":
+              filename = "index.html";
+              break;
+            case "css":
+              filename = "style.css";
+              break;
+            case "cpp":
+            case "c++":
+              filename = "main.cpp";
+              break;
+            case "c":
+              filename = "main.c";
+              break;
+            case "java":
+              filename = "Main.java";
+              break;
+            default:
+              filename = `file.${language}`;
+          }
+
+          // Check if this filename already exists, append a number if needed
+          let counter = 1;
+          let baseFilename = filename;
+          while (newFileTree[filename]) {
+            const parts = baseFilename.split(".");
+            const ext = parts.pop();
+            const name = parts.join(".");
+            filename = `${name}_${counter}.${ext}`;
+            counter++;
+          }
+
+          newFileTree[filename] = {
+            file: {
+              contents: code.trim(),
+            },
+          };
+        }
+
+        if (Object.keys(newFileTree).length > 0) {
+          return newFileTree;
+        }
+
         return null;
       }
 
       // Initialize the new file tree
       let newFileTree = {};
 
+      // Check for special file types (cppFile, javaFile, etc.)
+      const specialFileTypes = [
+        { key: "cppFile", defaultName: "main.cpp" },
+        { key: "javaFile", defaultName: "Main.java" },
+        { key: "cFile", defaultName: "main.c" },
+        { key: "pyFile", defaultName: "main.py" },
+        { key: "jsFile", defaultName: "script.js" },
+        { key: "htmlFile", defaultName: "index.html" },
+        { key: "cssFile", defaultName: "style.css" },
+      ];
+
+      for (const fileType of specialFileTypes) {
+        if (parsedData[fileType.key]) {
+          const fileInfo = parsedData[fileType.key];
+          const filename = fileInfo.filename || fileType.defaultName;
+          newFileTree[filename] = {
+            file: {
+              contents: fileInfo.fileContent || "",
+            },
+          };
+        }
+      }
+
       // Case 1: Message contains a fileTree property directly
       if (parsedData.fileTree && typeof parsedData.fileTree === "object") {
         console.log("Found fileTree property in message");
-        newFileTree = { ...parsedData.fileTree };
+        newFileTree = { ...newFileTree, ...parsedData.fileTree };
       }
 
       // Case 2: Message contains individual file definitions (html, css, js, etc.)
@@ -94,12 +221,9 @@ const Project = () => {
         "c",
         "cpp",
       ];
-      let hasFiles = false;
 
       fileTypes.forEach((type) => {
         if (parsedData[type] && parsedData[type].file) {
-          hasFiles = true;
-
           // Determine appropriate filename based on type
           let filename;
           switch (type) {
@@ -147,11 +271,10 @@ const Project = () => {
       if (parsedData.files && Array.isArray(parsedData.files)) {
         console.log("Found files array in message");
         parsedData.files.forEach((fileObj) => {
-          if (fileObj.name && fileObj.content) {
-            hasFiles = true;
+          if (fileObj.name && (fileObj.content || fileObj.contents)) {
             newFileTree[fileObj.name] = {
               file: {
-                contents: fileObj.content,
+                contents: fileObj.content || fileObj.contents,
               },
             };
           }
@@ -167,8 +290,6 @@ const Project = () => {
           (typeof parsedData[key] === "string" ||
             (parsedData[key].file && parsedData[key].file.contents))
         ) {
-          hasFiles = true;
-
           // If it's a string, convert to proper file object
           if (typeof parsedData[key] === "string") {
             newFileTree[key] = {
@@ -183,7 +304,7 @@ const Project = () => {
       });
 
       // If we found files using any method, return the new file tree
-      if (Object.keys(newFileTree).length > 0 || hasFiles) {
+      if (Object.keys(newFileTree).length > 0) {
         console.log("Processed file tree from AI:", newFileTree);
         return newFileTree;
       }
@@ -311,17 +432,41 @@ const Project = () => {
       const response = await axiosInstance.get(
         `/messages/history/${projectId}`
       );
+
       console.log("Message history loaded:", response.data.messages);
-      setMessages(response.data.messages || []);
+
+      // Create a message ID map to prevent duplicates
+      const uniqueMessages = [];
+      const messageIds = new Set();
+
+      // Filter out duplicates by ID
+      if (response.data.messages && Array.isArray(response.data.messages)) {
+        response.data.messages.forEach((msg) => {
+          if (msg._id && !messageIds.has(msg._id)) {
+            messageIds.add(msg._id);
+            uniqueMessages.push(msg);
+          } else if (!msg._id) {
+            // For messages without IDs, create a composite key
+            const compositeKey = `${msg.sender?._id}-${
+              msg.timestamp
+            }-${msg.message?.substring(0, 20)}`;
+            if (!messageIds.has(compositeKey)) {
+              messageIds.add(compositeKey);
+              uniqueMessages.push(msg);
+            }
+          }
+        });
+      }
+
+      setMessages(uniqueMessages);
       setMessagesLoaded(true);
-      return response.data.messages;
+      return uniqueMessages;
     } catch (err) {
       console.error("Failed to fetch message history:", err);
       setMessagesLoaded(true);
       return [];
     }
   };
-
   function addCollaborators() {
     if (!project?._id) {
       setStatusMessage("Project not loaded properly");
@@ -355,8 +500,6 @@ const Project = () => {
         setTimeout(() => setStatusMessage(""), 3000);
       });
   }
-
-  // Add these functions to your Project component
 
   // Function to delete a specific message
   const deleteMessage = async (messageId) => {
@@ -440,78 +583,204 @@ const Project = () => {
     setMessage("");
   };
 
-  function WriteAiMessage(message) {
-    // First, check if the message starts with a JSON structure
-    if (message.trim().startsWith("{") && message.trim().endsWith("}")) {
-      try {
-        // Try to parse as JSON
-        const messageObject = JSON.parse(message);
+  // Add timestamp to terminal output
+  const addToTerminal = (text) => {
+    const timestamp = new Date().toLocaleTimeString();
+    setTerminalOutput((prev) => [...prev, { text, timestamp }]);
 
-        // If it has a "text" field, render that
-        if (messageObject.text) {
-          return (
-            <div className="overflow-auto bg-slate-950 text-white rounded-sm p-2">
-              <Markdown
-                children={messageObject.text}
-                options={{
-                  overrides: {
-                    code: SyntaxHighlightedCode,
-                  },
-                }}
-              />
-            </div>
+    // Auto-scroll terminal
+    if (terminalRef.current) {
+      setTimeout(() => {
+        terminalRef.current.scrollTop = terminalRef.current.scrollHeight;
+      }, 100);
+    }
+  };
+
+  // Clear terminal
+  const clearTerminal = () => {
+    setTerminalOutput([]);
+  };
+
+  // Improved function to handle AI message display
+  // Improved AI message parser for better file handling
+  function WriteAiMessage(message) {
+    // First, try to identify if the message contains code blocks
+    if (message.includes("```")) {
+      try {
+        // Extract code blocks and language
+        const codeBlockRegex = /```(\w+)?\s*([\s\S]*?)```/g;
+        let match;
+        let formattedMessage = message;
+
+        while ((match = codeBlockRegex.exec(message)) !== null) {
+          const language = match[1] || "plaintext";
+          const code = match[2];
+
+          // Create a formatted code block with proper syntax highlighting
+          const highlightedCode = hljs.highlight(language, code, true).value;
+
+          formattedMessage = formattedMessage.replace(
+            match[0],
+            `<pre class="bg-slate-800 p-3 rounded"><code class="language-${language} text-white">${highlightedCode}</code></pre>`
           );
         }
-        // For structured responses like project ideas, format them nicely
-        if (messageObject.projectIdeas) {
-          return (
-            <div className="overflow-auto bg-slate-950 text-white rounded-sm p-2">
-              {messageObject.projectIdeas.map((project, index) => (
-                <div key={index} className="mb-4">
-                  <h3 className="font-bold">{project.projectName}</h3>
-                  <p className="mb-2">{project.description}</p>
-                  <ul className="list-disc pl-5">
-                    {project.features.map((feature, idx) => (
-                      <li key={idx}>{feature}</li>
-                    ))}
-                  </ul>
-                </div>
-              ))}
-            </div>
-          );
-        }
-        
-        // For other JSON responses, format as plain text
+
         return (
-          <div className="overflow-auto bg-slate-950 text-white rounded-sm p-2">
-            <Markdown
-              children={message}
-              options={{
-                overrides: {
-                  code: SyntaxHighlightedCode,
-                },
-              }}
-            />
-          </div>
+          <div
+            className="overflow-auto rounded-sm p-2"
+            dangerouslySetInnerHTML={{ __html: formattedMessage }}
+          />
         );
       } catch (error) {
-        console.warn("Failed to parse AI message as JSON:", error);
+        console.warn("Error formatting code blocks:", error);
       }
     }
 
-    // Default: treat as plain text/markdown
-    return (
-      <div className="overflow-auto bg-slate-950 text-white rounded-sm p-2">
-        <Markdown
-          children={message}
-          options={{
-            overrides: {
-              code: SyntaxHighlightedCode,
-            },
-          }}
-        />
-      </div>
-    );
+    // Try to parse as JSON for structured responses
+    try {
+      // Check if the message is complete JSON (sometimes it can be partial)
+      let jsonMessage = message;
+
+      // Attempt to find and extract valid JSON from the message
+      const jsonRegex = /{[\s\S]*}/g;
+      const jsonMatches = message.match(jsonRegex);
+
+      if (jsonMatches && jsonMatches.length > 0) {
+        // Use the first complete JSON object found
+        jsonMessage = jsonMatches[0];
+      }
+
+      const messageObject = JSON.parse(jsonMessage);
+
+      // Handle cppFile, javaFile, or other language files
+      if (messageObject.cppFile) {
+        return (
+          <div className="overflow-auto bg-slate-950 text-white rounded-sm p-2">
+            <div className="mb-2 font-bold">
+              {messageObject.cppFile.filename || "C++ File"}
+            </div>
+            <pre className="whitespace-pre-wrap">
+              <code className="language-cpp">
+                {messageObject.cppFile.fileContent}
+              </code>
+            </pre>
+          </div>
+        );
+      }
+
+      // Handle Java files
+      if (messageObject.javaFile) {
+        return (
+          <div className="overflow-auto bg-slate-950 text-white rounded-sm p-2">
+            <div className="mb-2 font-bold">
+              {messageObject.javaFile.filename || "Java File"}
+            </div>
+            <pre className="whitespace-pre-wrap">
+              <code className="language-java">
+                {messageObject.javaFile.fileContent}
+              </code>
+            </pre>
+          </div>
+        );
+      }
+
+      // Generic file handling
+      const fileTypes = [
+        "cppFile",
+        "javaFile",
+        "cFile",
+        "pyFile",
+        "jsFile",
+        "htmlFile",
+        "cssFile",
+      ];
+      for (const fileType of fileTypes) {
+        if (messageObject[fileType]) {
+          const fileInfo = messageObject[fileType];
+          const language = fileType.replace("File", "");
+
+          return (
+            <div className="overflow-auto bg-slate-950 text-white rounded-sm p-2">
+              <div className="mb-2 font-bold">
+                {fileInfo.filename || `${language.toUpperCase()} File`}
+              </div>
+              <pre className="whitespace-pre-wrap">
+                <code className={`language-${language}`}>
+                  {fileInfo.fileContent}
+                </code>
+              </pre>
+            </div>
+          );
+        }
+      }
+
+      // Check for projectIdeas
+      if (
+        messageObject.projectIdeas &&
+        Array.isArray(messageObject.projectIdeas)
+      ) {
+        return (
+          <div className="overflow-auto bg-slate-950 text-white rounded-sm p-2">
+            <h3 className="font-bold mb-2">Project Ideas:</h3>
+            {messageObject.projectIdeas.map((project, index) => (
+              <div key={index} className="mb-4 border-t border-gray-700 pt-2">
+                <h4 className="font-bold text-blue-300">
+                  {project.projectName}
+                </h4>
+                <p className="mb-2">{project.description}</p>
+
+                {project.technologies && (
+                  <div className="mb-2">
+                    <span className="font-semibold">Technologies: </span>
+                    {project.technologies.join(", ")}
+                  </div>
+                )}
+
+                {project.features && Array.isArray(project.features) && (
+                  <div className="mb-2">
+                    <span className="font-semibold">Features:</span>
+                    <ul className="list-disc pl-5 mt-1">
+                      {project.features.map((feature, idx) => (
+                        <li key={idx}>{feature}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
+                {project.difficulty && (
+                  <div className="text-sm text-gray-400">
+                    Difficulty: {project.difficulty}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        );
+      }
+
+      // For other structured data, format it nicely
+      return (
+        <div className="overflow-auto bg-slate-950 text-white rounded-sm p-2">
+          <pre className="whitespace-pre-wrap">
+            {JSON.stringify(messageObject, null, 2)}
+          </pre>
+        </div>
+      );
+    } catch (error) {
+      // If JSON parsing fails, treat as markdown
+      return (
+        <div className="overflow-auto bg-slate-950 text-white rounded-sm p-2">
+          <Markdown
+            children={message}
+            options={{
+              overrides: {
+                code: SyntaxHighlightedCode,
+              },
+            }}
+          />
+        </div>
+      );
+    }
   }
 
   // Initialize WebContainer separately to better handle errors
@@ -606,7 +875,25 @@ const Project = () => {
       // Set up message listener
       receiveMessage("project-message", (data) => {
         console.log("Received message:", data);
+        // Create a composite key for the message
+        const newMessageKey = `${data.sender?._id}-${
+          data.timestamp
+        }-${data.message?.substring(0, 20)}`;
 
+        // Check if this message already exists in our messages array
+        const isDuplicate = messages.some((msg) => {
+          if (msg._id && data._id && msg._id === data._id) return true;
+
+          const existingKey = `${msg.sender?._id}-${
+            msg.timestamp
+          }-${msg.message?.substring(0, 20)}`;
+          return existingKey === newMessageKey;
+        });
+
+        if (isDuplicate) {
+          console.log("Skipping duplicate message");
+          return;
+        }
         if (data.sender?._id === "ai") {
           try {
             // Process the AI message to extract file information
@@ -779,7 +1066,7 @@ const Project = () => {
     return fileTree[file].file.contents;
   };
 
-  // Improved runProject function to fix execution issues
+  // Improved runProject function to fix execution issues and display output in UI
   const runProject = async () => {
     if (!webContainer) {
       console.error("WebContainer not initialized");
@@ -792,8 +1079,12 @@ const Project = () => {
 
     setIsLoading(true);
     setStatusMessage("Setting up project...");
+    clearTerminal();
+    addToTerminal("🚀 Starting project...");
+    setShowTerminal(true);
 
     try {
+      addToTerminal("📂 Preparing file system...");
       console.log("Running project with file tree:", fileTree);
 
       // Ensure file tree is mounted
@@ -804,6 +1095,7 @@ const Project = () => {
       if (!mountSuccess) {
         console.error("Failed to mount file tree before running");
         setStatusMessage("Failed to mount file tree. Please try again.");
+        addToTerminal("❌ Failed to mount file tree. Please try again.");
         setTimeout(() => setStatusMessage(""), 5000);
         setIsLoading(false);
         return;
@@ -820,17 +1112,20 @@ const Project = () => {
 
       // Kill any existing process
       if (runProcess) {
+        addToTerminal("🛑 Stopping existing process...");
         console.log("Killing existing process");
         try {
           await runProcess.kill();
           setRunProcess(null);
         } catch (err) {
           console.error("Error killing process:", err);
+          addToTerminal(`⚠️ Error stopping existing process: ${err.message}`);
         }
       }
 
       // Create necessary files based on project type
       if (hasHtmlFile && !fileNames.includes("server.js")) {
+        addToTerminal("📝 Creating server for HTML project...");
         setStatusMessage("Creating server for HTML project...");
         // Create a simple server for HTML projects
         const serverCode = `
@@ -850,10 +1145,12 @@ app.listen(port, () => {
 });`;
 
         await webContainer.fs.writeFile("server.js", serverCode);
+        addToTerminal("✅ Created server.js");
       }
 
       // Create package.json if it doesn't exist but is needed
       if (!hasPackageJson && (hasHtmlFile || hasJsFile)) {
+        addToTerminal("📝 Creating package.json...");
         setStatusMessage("Creating package.json...");
         const packageJson = {
           name: "web-project",
@@ -878,31 +1175,34 @@ app.listen(port, () => {
           "package.json",
           JSON.stringify(packageJson, null, 2)
         );
+        addToTerminal("✅ Created package.json");
       }
 
       // For Python projects
       if (hasPythonFile && !fileNames.includes("requirements.txt")) {
+        addToTerminal("📝 Setting up Python environment...");
         setStatusMessage("Setting up Python environment...");
         await webContainer.fs.writeFile(
           "requirements.txt",
           "# No requirements specified\n"
         );
+        addToTerminal("✅ Created requirements.txt");
       }
 
       // Install dependencies based on project type
       if (hasPackageJson || hasHtmlFile || hasJsFile) {
+        addToTerminal("📦 Installing npm dependencies...");
         setStatusMessage("Installing npm dependencies...");
         console.log("Installing npm dependencies...");
 
         const installProcess = await webContainer.spawn("npm", ["install"]);
 
         // Create a writable stream to capture installation output
-        const installOutput = [];
         installProcess.output.pipeTo(
           new WritableStream({
             write(chunk) {
-              installOutput.push(chunk);
               console.log("Install output:", chunk);
+              addToTerminal(`📦 ${chunk}`);
             },
           })
         );
@@ -912,12 +1212,15 @@ app.listen(port, () => {
         console.log("Installation completed with exit code:", installExitCode);
 
         if (installExitCode !== 0) {
+          addToTerminal(`❌ Installation failed with code ${installExitCode}`);
           setStatusMessage(`Installation failed with code ${installExitCode}`);
           setTimeout(() => setStatusMessage(""), 5000);
           setIsLoading(false);
           return;
         }
+        addToTerminal("✅ Dependencies installed successfully");
       } else if (hasPythonFile) {
+        addToTerminal("📦 Installing Python dependencies...");
         setStatusMessage("Installing Python dependencies...");
         console.log("Installing Python dependencies...");
 
@@ -928,26 +1231,28 @@ app.listen(port, () => {
         ]);
 
         // Log installation output
-        const pipOutput = [];
         pipProcess.output.pipeTo(
           new WritableStream({
             write(chunk) {
-              pipOutput.push(chunk);
               console.log("Pip install output:", chunk);
+              addToTerminal(`📦 ${chunk}`);
             },
           })
         );
 
         const pipExitCode = await pipProcess.exit;
         if (pipExitCode !== 0) {
+          addToTerminal(`❌ Pip installation failed with code ${pipExitCode}`);
           setStatusMessage(`Pip installation failed with code ${pipExitCode}`);
           setTimeout(() => setStatusMessage(""), 5000);
           setIsLoading(false);
           return;
         }
+        addToTerminal("✅ Python dependencies installed successfully");
       }
 
       // Start the application based on project type
+      addToTerminal("🚀 Starting application...");
       setStatusMessage("Starting application...");
       console.log("Starting application...");
       let newRunProcess;
@@ -959,6 +1264,9 @@ app.listen(port, () => {
         newRunProcess = await webContainer.spawn("python", [mainPyFile]);
       } else {
         console.error("Unsupported project type");
+        addToTerminal(
+          "❌ Unsupported project type. Please add HTML, JS, or Python files."
+        );
         setStatusMessage(
           "Unsupported project type. Please add HTML, JS, or Python files."
         );
@@ -969,13 +1277,12 @@ app.listen(port, () => {
 
       setRunProcess(newRunProcess);
 
-      // Log application output
-      const appOutput = [];
+      // Log application output to terminal
       newRunProcess.output.pipeTo(
         new WritableStream({
           write(chunk) {
-            appOutput.push(chunk);
             console.log("App output:", chunk);
+            addToTerminal(`🔄 ${chunk}`);
 
             // Update status with latest output
             setStatusMessage(`Running: ${chunk}`);
@@ -985,10 +1292,12 @@ app.listen(port, () => {
       );
 
       console.log("Application started");
+      addToTerminal("✅ Application started successfully!");
       setStatusMessage("Application started successfully!");
       setTimeout(() => setStatusMessage(""), 3000);
     } catch (error) {
       console.error("Error running the project:", error);
+      addToTerminal(`❌ Error running project: ${error.message}`);
       setStatusMessage("Error running project: " + error.message);
       setTimeout(() => setStatusMessage(""), 5000);
     } finally {
@@ -1009,7 +1318,7 @@ app.listen(port, () => {
   }
 
   return (
-    <main className="h-screen w-screen flex">
+    <main className="h-screen w-screen flex flex-col md:flex-row">
       <section className="left relative flex flex-col h-screen min-w-96 bg-slate-300">
         <header className="flex justify-between items-center p-2 px-4 w-full bg-slate-100 absolute z-10 top-0">
           <button className="flex gap-2" onClick={() => setIsModalOpen(true)}>
@@ -1113,7 +1422,7 @@ app.listen(port, () => {
         <div
           className={`sidePanel w-full h-full flex flex-col gap-2 bg-slate-50 absolute transition-all ${
             isSidePanelOpen ? "translate-x-0" : "-translate-x-full"
-          } top-0`}
+          } top-0 z-20`}
         >
           <header className="flex justify-between items-center px-4 p-2 bg-slate-200">
             <h1 className="font-semibold text-lg">Collaborators</h1>
@@ -1143,7 +1452,7 @@ app.listen(port, () => {
           </div>
         </div>
       </section>
-      <section className="right bg-red-50 flex-grow h-full flex">
+      <section className="right bg-red-50 flex-grow h-full flex flex-col md:flex-row">
         <div className="explorer h-full max-w-64 min-w-52 bg-slate-200 flex flex-col">
           <div className="explorer-header p-2 flex justify-between items-center bg-slate-300">
             <h3 className="font-semibold">Files</h3>
@@ -1255,9 +1564,16 @@ app.listen(port, () => {
                 </span>
               </div>
               <button
+                onClick={() => setShowTerminal(!showTerminal)}
+                className="p-2 px-3 bg-slate-700 text-white rounded-l"
+                title="Toggle Terminal"
+              >
+                <i className="ri-terminal-line"></i>
+              </button>
+              <button
                 onClick={runProject}
                 disabled={isLoading || containerStatus !== "Ready"}
-                className={`p-2 px-4 ${
+                className={`p-2 px-4 rounded-r ${
                   isLoading || containerStatus !== "Ready"
                     ? "bg-gray-300 cursor-not-allowed"
                     : "bg-green-500 hover:bg-green-600 cursor-pointer text-white"
@@ -1267,50 +1583,99 @@ app.listen(port, () => {
               </button>
             </div>
           </div>
-          <div className="bottom flex flex-grow max-w-full shrink overflow-auto">
-            {currentFile && fileTree[currentFile] ? (
-              <div className="code-editor-area h-full overflow-auto flex-grow bg-slate-50">
-                <pre className="hljs h-full">
-                  <code
-                    className={`hljs h-full outline-none language-${getLanguageFromFilename(
-                      currentFile
-                    )}`}
-                    contentEditable
-                    suppressContentEditableWarning
-                    onBlur={(e) => {
-                      const updatedContent = e.target.innerText;
-                      const ft = {
-                        ...fileTree,
-                        [currentFile]: {
-                          file: {
-                            contents: updatedContent,
+          <div className="flex flex-col flex-grow overflow-hidden">
+            <div className="flex-grow overflow-auto relative">
+              {currentFile && fileTree[currentFile] ? (
+                <div className="code-editor-area h-full overflow-auto flex-grow bg-slate-50">
+                  <pre className="hljs h-full">
+                    <code
+                      className={`hljs h-full outline-none language-${getLanguageFromFilename(
+                        currentFile
+                      )}`}
+                      contentEditable
+                      suppressContentEditableWarning
+                      onBlur={(e) => {
+                        const updatedContent = e.target.innerText;
+                        const ft = {
+                          ...fileTree,
+                          [currentFile]: {
+                            file: {
+                              contents: updatedContent,
+                            },
                           },
-                        },
-                      };
-                      setFileTree(ft);
-                      saveFileTree(ft);
-                    }}
-                    dangerouslySetInnerHTML={{
-                      __html: hljs.highlight(
-                        getLanguageFromFilename(currentFile),
-                        getFileContents(currentFile)
-                      ).value,
-                    }}
-                    style={{
-                      whiteSpace: "pre-wrap",
-                      paddingBottom: "25rem",
-                      counterSet: "line-numbering",
-                    }}
-                  />
-                </pre>
+                        };
+                        setFileTree(ft);
+                        saveFileTree(ft);
+                      }}
+                      dangerouslySetInnerHTML={{
+                        __html: hljs.highlight(
+                          getLanguageFromFilename(currentFile),
+                          getFileContents(currentFile)
+                        ).value,
+                      }}
+                      style={{
+                        whiteSpace: "pre-wrap",
+                        paddingBottom: "25rem",
+                        counterSet: "line-numbering",
+                      }}
+                    />
+                  </pre>
+                </div>
+              ) : (
+                <div className="flex items-center justify-center w-full h-full bg-slate-50 text-gray-500">
+                  {Object.keys(fileTree).length > 0
+                    ? "Select a file to edit"
+                    : "No files available"}
+                </div>
+              )}
+
+              {/* Terminal Panel */}
+              <div
+                className={`terminal-panel absolute bottom-0 left-0 right-0 bg-black text-green-400 transition-all duration-300 ease-in-out overflow-hidden ${
+                  showTerminal ? "h-48" : "h-0"
+                }`}
+              >
+                <div className="terminal-header flex justify-between items-center p-1 bg-gray-800 border-b border-gray-700">
+                  <div className="flex items-center">
+                    <span className="px-2 text-xs font-mono">Terminal</span>
+                  </div>
+                  <div className="flex">
+                    <button
+                      onClick={clearTerminal}
+                      className="p-1 px-2 text-xs hover:bg-gray-700 rounded"
+                      title="Clear Terminal"
+                    >
+                      Clear
+                    </button>
+                    <button
+                      onClick={() => setShowTerminal(false)}
+                      className="p-1 px-2 text-xs hover:bg-gray-700 rounded"
+                    >
+                      ×
+                    </button>
+                  </div>
+                </div>
+                <div
+                  ref={terminalRef}
+                  className="terminal-content p-2 overflow-auto h-40 font-mono text-sm"
+                >
+                  {terminalOutput.length > 0 ? (
+                    terminalOutput.map((entry, index) => (
+                      <div key={index} className="terminal-line">
+                        <span className="text-gray-500 text-xs mr-2">
+                          [{entry.timestamp}]
+                        </span>
+                        <span>{entry.text}</span>
+                      </div>
+                    ))
+                  ) : (
+                    <div className="text-gray-500">
+                      Terminal ready. Run your project to see output here.
+                    </div>
+                  )}
+                </div>
               </div>
-            ) : (
-              <div className="flex items-center justify-center w-full h-full bg-slate-50 text-gray-500">
-                {Object.keys(fileTree).length > 0
-                  ? "Select a file to edit"
-                  : "No files available"}
-              </div>
-            )}
+            </div>
           </div>
         </div>
 
