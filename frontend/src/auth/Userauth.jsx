@@ -12,7 +12,7 @@ const UserAuth = ({ children }) => {
     const verifyAuth = async () => {
       if (!user && token) {
         try {
-          const response = await axiosInstance.get("/users/me");
+          const response = await axiosInstance.get("/users/profile");
           setUser(response.data.user);
         } catch (error) {
           console.error("Auth verification failed:", error);

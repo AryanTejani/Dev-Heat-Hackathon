@@ -45,6 +45,7 @@ const Project = () => {
   const [users, setUsers] = useState([]);
   const [messages, setMessages] = useState([]);
   const [fileTree, setFileTree] = useState({});
+  const [messagesLoaded, setMessagesLoaded] = useState(false);
 
   const [currentFile, setCurrentFile] = useState(null);
   const [openFiles, setOpenFiles] = useState([]);
@@ -304,6 +305,23 @@ const Project = () => {
     }
   };
 
+  // New function to load message history
+  const loadMessageHistory = async (projectId) => {
+    try {
+      const response = await axiosInstance.get(
+        `/messages/history/${projectId}`
+      );
+      console.log("Message history loaded:", response.data.messages);
+      setMessages(response.data.messages || []);
+      setMessagesLoaded(true);
+      return response.data.messages;
+    } catch (err) {
+      console.error("Failed to fetch message history:", err);
+      setMessagesLoaded(true);
+      return [];
+    }
+  };
+
   function addCollaborators() {
     if (!project?._id) {
       setStatusMessage("Project not loaded properly");
@@ -338,48 +356,162 @@ const Project = () => {
       });
   }
 
+  // Add these functions to your Project component
+
+  // Function to delete a specific message
+  const deleteMessage = async (messageId) => {
+    try {
+      await axiosInstance.delete(`/messages/delete/${messageId}`);
+
+      // Update local state
+      setMessages((prevMessages) =>
+        prevMessages.filter((msg) => msg._id !== messageId)
+      );
+
+      setStatusMessage("Message deleted successfully");
+      setTimeout(() => setStatusMessage(""), 3000);
+    } catch (error) {
+      console.error("Failed to delete message:", error);
+      setStatusMessage("Failed to delete message");
+      setTimeout(() => setStatusMessage(""), 3000);
+    }
+  };
+
+  // Function to clear all messages in the project
+  const clearHistory = async () => {
+    // Show confirmation dialog
+    if (
+      !window.confirm(
+        "Are you sure you want to clear all messages? This action cannot be undone."
+      )
+    ) {
+      return;
+    }
+
+    try {
+      const projectId = getProjectId();
+      if (!projectId) {
+        setStatusMessage("Project ID not found");
+        setTimeout(() => setStatusMessage(""), 3000);
+        return;
+      }
+
+      await axiosInstance.delete(`/messages/clear/${projectId}`);
+
+      // Clear messages in local state
+      setMessages([]);
+
+      setStatusMessage("Message history cleared successfully");
+      setTimeout(() => setStatusMessage(""), 3000);
+    } catch (error) {
+      console.error("Failed to clear message history:", error);
+      setStatusMessage("Failed to clear message history");
+      setTimeout(() => setStatusMessage(""), 3000);
+    }
+  };
+
   const send = () => {
     if (!project?._id || !user || !message.trim()) return;
 
-    sendMessage("project-message", {
-      message,
+    // Create message object
+    const messageObj = {
+      message: message.trim(),
       sender: user,
-      projectId: project._id, // Include project ID for better tracking
-    });
-    setMessages((prevMessages) => [...prevMessages, { sender: user, message }]);
+      projectId: project._id,
+      timestamp: new Date().toISOString(),
+    };
+
+    // Send via socket
+    sendMessage("project-message", messageObj);
+
+    // Add to local state immediately for UI responsiveness
+    setMessages((prevMessages) => [...prevMessages, messageObj]);
+
+    // Also save to database for persistence
+    axiosInstance
+      .post("/messages/save", messageObj)
+      .then((res) => {
+        console.log("Message saved to database:", res.data);
+      })
+      .catch((err) => {
+        console.error("Failed to save message to database:", err);
+      });
+
     setMessage("");
   };
 
   function WriteAiMessage(message) {
-    try {
-      const messageObject = JSON.parse(message);
-      return (
-        <div className="overflow-auto bg-slate-950 text-white rounded-sm p-2">
-          <Markdown
-            children={messageObject.text || message}
-            options={{
-              overrides: {
-                code: SyntaxHighlightedCode,
-              },
-            }}
-          />
-        </div>
-      );
-    } catch (error) {
-      console.warn("Failed to parse AI message as JSON:", error);
-      return (
-        <div className="overflow-auto bg-slate-950 text-white rounded-sm p-2">
-          <Markdown
-            children={message}
-            options={{
-              overrides: {
-                code: SyntaxHighlightedCode,
-              },
-            }}
-          />
-        </div>
-      );
+    // First, check if the message starts with a JSON structure
+    if (message.trim().startsWith("{") && message.trim().endsWith("}")) {
+      try {
+        // Try to parse as JSON
+        const messageObject = JSON.parse(message);
+
+        // If it has a "text" field, render that
+        if (messageObject.text) {
+          return (
+            <div className="overflow-auto bg-slate-950 text-white rounded-sm p-2">
+              <Markdown
+                children={messageObject.text}
+                options={{
+                  overrides: {
+                    code: SyntaxHighlightedCode,
+                  },
+                }}
+              />
+            </div>
+          );
+        }
+        // For structured responses like project ideas, format them nicely
+        if (messageObject.projectIdeas) {
+          return (
+            <div className="overflow-auto bg-slate-950 text-white rounded-sm p-2">
+              {messageObject.projectIdeas.map((project, index) => (
+                <div key={index} className="mb-4">
+                  <h3 className="font-bold">{project.projectName}</h3>
+                  <p className="mb-2">{project.description}</p>
+                  <ul className="list-disc pl-5">
+                    {project.features.map((feature, idx) => (
+                      <li key={idx}>{feature}</li>
+                    ))}
+                  </ul>
+                </div>
+              ))}
+            </div>
+          );
+        }
+        
+        // For other JSON responses, format as plain text
+        return (
+          <div className="overflow-auto bg-slate-950 text-white rounded-sm p-2">
+            <Markdown
+              children={message}
+              options={{
+                overrides: {
+                  code: SyntaxHighlightedCode,
+                },
+              }}
+            />
+          </div>
+        );
+      } catch (error) {
+        console.warn("Failed to parse AI message as JSON:", error);
+      }
     }
+
+    // Default: treat as plain text/markdown
+    return (
+      <div className="overflow-auto bg-slate-950 text-white rounded-sm p-2">
+        <Markdown
+          children={message}
+          options={{
+            overrides: {
+              code: SyntaxHighlightedCode,
+            },
+          }}
+        />
+      </div>
+    );
   }
 
   // Initialize WebContainer separately to better handle errors
@@ -465,6 +597,9 @@ const Project = () => {
         return;
       }
 
+      // Load message history
+      loadMessageHistory(projectId);
+
       // Initialize socket connection
       initializeSocket(projectId);
 
@@ -514,6 +649,18 @@ const Project = () => {
               }
             }
 
+            // Save the message to the database for persistence
+            axiosInstance
+              .post("/messages/save", {
+                message: data.message,
+                sender: data.sender,
+                projectId: projectId,
+                timestamp: data.timestamp || new Date().toISOString(),
+              })
+              .catch((err) => {
+                console.error("Failed to save AI message to database:", err);
+              });
+
             setMessages((prevMessages) => [...prevMessages, data]);
           } catch (error) {
             console.error("Error processing AI message:", error);
@@ -525,6 +672,21 @@ const Project = () => {
           if (requestedFile) {
             console.log(`User requested to create file: ${requestedFile}`);
             // You could set some state here to indicate to the AI that a file was requested
+          }
+
+          // Save regular user messages to database too
+          if (!data._id) {
+            // Only save if it doesn't already have an ID (not from history)
+            axiosInstance
+              .post("/messages/save", {
+                message: data.message,
+                sender: data.sender,
+                projectId: projectId,
+                timestamp: data.timestamp || new Date().toISOString(),
+              })
+              .catch((err) => {
+                console.error("Failed to save user message to database:", err);
+              });
           }
 
           setMessages((prevMessages) => [...prevMessages, data]);
@@ -857,6 +1019,14 @@ app.listen(port, () => {
           <div className="flex items-center">
             <span className="text-sm mr-2">{project?.name || "Project"}</span>
             <button
+              onClick={clearHistory}
+              className="p-1 px-2 text-xs text-red-600 hover:bg-red-100 rounded mr-2"
+              title="Clear all messages"
+            >
+              <i className="ri-delete-bin-line mr-1"></i>
+              Clear chat
+            </button>
+            <button
               onClick={() => setIsSidePanelOpen(!isSidePanelOpen)}
               className="p-2"
             >
@@ -869,27 +1039,61 @@ app.listen(port, () => {
             ref={messageBox}
             className="message-box p-1 flex-grow flex flex-col gap-1 overflow-auto max-h-full scrollbar-hide"
           >
-            {messages.map((msg, index) => (
-              <div
-                key={index}
-                className={`${
-                  msg.sender?._id === "ai" ? "max-w-80" : "max-w-52"
-                } ${
-                  msg.sender?._id === user?._id?.toString() && "ml-auto"
-                }  message flex flex-col p-2 bg-slate-50 w-fit rounded-md`}
-              >
-                <small className="opacity-65 text-xs">
-                  {msg.sender?.email || "Unknown"}
-                </small>
-                <div className="text-sm">
-                  {msg.sender?._id === "ai" ? (
-                    WriteAiMessage(msg.message)
-                  ) : (
-                    <p>{msg.message}</p>
-                  )}
+            {messagesLoaded ? (
+              messages.length > 0 ? (
+                messages.map((msg, index) => (
+                  <div
+                    key={index}
+                    className={`${
+                      msg.sender?._id === "ai" ? "max-w-80" : "max-w-52"
+                    } ${
+                      msg.sender?._id === user?._id?.toString() && "ml-auto"
+                    } message flex flex-col p-2 bg-slate-50 w-fit rounded-md relative group`}
+                  >
+                    <small className="opacity-65 text-xs flex justify-between">
+                      <span>{msg.sender?.email || "Unknown"}</span>
+                      {msg.timestamp && (
+                        <span className="ml-2 text-gray-400">
+                          {new Date(msg.timestamp).toLocaleTimeString([], {
+                            hour: "2-digit",
+                            minute: "2-digit",
+                          })}
+                        </span>
+                      )}
+                    </small>
+                    <div className="text-sm">
+                      {msg.sender?._id === "ai" ? (
+                        WriteAiMessage(msg.message)
+                      ) : (
+                        <p>{msg.message}</p>
+                      )}
+                    </div>
+
+                    {/* Delete button - only visible on hover */}
+                    {msg._id && (
+                      <button
+                        onClick={() => deleteMessage(msg._id)}
+                        className="absolute top-1 right-1 text-red-500 opacity-0 group-hover:opacity-100 transition-opacity p-1 hover:bg-red-50 rounded-full"
+                        title="Delete message"
+                      >
+                        <i className="ri-delete-bin-line text-xs"></i>
+                      </button>
+                    )}
+                  </div>
+                ))
+              ) : (
+                <div className="flex items-center justify-center h-full text-gray-500">
+                  No messages yet. Start a conversation!
+                </div>
+              )
+            ) : (
+              <div className="flex items-center justify-center h-full">
+                <div className="text-center">
+                  <div className="animate-spin rounded-full h-8 w-8 border-t-2 border-b-2 border-blue-500 mx-auto mb-2"></div>
+                  <p className="text-gray-600">Loading messages...</p>
                 </div>
               </div>
-            ))}
+            )}
           </div>
 
           <div className="inputField w-full flex absolute bottom-0">

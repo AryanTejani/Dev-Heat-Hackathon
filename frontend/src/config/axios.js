@@ -1,7 +1,7 @@
 import axios from "axios";
 
 const axiosInstance = axios.create({
-  baseURL: import.meta.env.VITE_API_URL,
+  baseURL: import.meta.env.VITE_API_URL || "http://localhost:5000",
 });
 
 // Add request interceptor to dynamically add token to all requests
@@ -23,10 +23,14 @@ axiosInstance.interceptors.request.use(
 axiosInstance.interceptors.response.use(
   (response) => response,
   (error) => {
-    if (error.response && error.response.status === 401) {
-      // Token expired or invalid - redirect to login without clearing token
-      // This allows the user to potentially refresh the token instead of logging out
-      window.location.href = '/login';
+    // Handle 401 (Unauthorized) and 404 (Not Found) errors
+    if (error.response) {
+      if (error.response.status === 401) {
+        // Token expired or invalid - redirect to login
+        localStorage.removeItem("token"); // Clear invalid token
+        window.location.href = '/login';
+      }
+      // You can also handle 404 errors here if needed
     }
     return Promise.reject(error);
   }
