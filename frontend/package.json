@@ -10,16 +10,21 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@gsap/react": "^2.1.2",
     "@webcontainer/api": "^1.5.1-internal.9",
     "axios": "^1.8.2",
+    "classnames": "^2.5.1",
+    "gsap": "^3.12.7",
     "highlight.js": "^11.11.1",
+    "lucide-react": "^0.487.0",
     "markdown-to-jsx": "^7.7.4",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-router-dom": "^7.3.0",
     "remixicon": "^4.6.0",
     "remixicons": "^4.6.1",
-    "socket.io-client": "^4.8.1"
+    "socket.io-client": "^4.8.1",
+    "tailwindcss-animate": "^1.0.7"
   },
   "devDependencies": {
     "@eslint/js": "^9.21.0",

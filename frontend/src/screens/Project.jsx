@@ -601,186 +601,274 @@ const Project = () => {
     setTerminalOutput([]);
   };
 
-  // Improved function to handle AI message display
-  // Improved AI message parser for better file handling
-  function WriteAiMessage(message) {
-    // First, try to identify if the message contains code blocks
-    if (message.includes("```")) {
+  /**
+   * Attempts to parse JSON with automatic fixes for common syntax errors
+   * @param {string} jsonString - The potentially malformed JSON string
+   * @returns {object|null} Parsed object or null if parsing fails
+   */
+  function tryParseJSON(jsonString) {
+    if (typeof jsonString !== "string") return null;
+
+    try {
+      // First try to parse directly
+      return JSON.parse(jsonString);
+    } catch (initialError) {
       try {
-        // Extract code blocks and language
-        const codeBlockRegex = /```(\w+)?\s*([\s\S]*?)```/g;
-        let match;
-        let formattedMessage = message;
+        // Try common fixes for malformed JSON
+        let fixed = jsonString.trim();
 
-        while ((match = codeBlockRegex.exec(message)) !== null) {
-          const language = match[1] || "plaintext";
-          const code = match[2];
+        // Fix 1: Add missing closing braces/brackets
+        let stack = [];
+        let inString = false;
+        let escapeChar = false;
 
-          // Create a formatted code block with proper syntax highlighting
-          const highlightedCode = hljs.highlight(language, code, true).value;
+        for (let i = 0; i < fixed.length; i++) {
+          const char = fixed[i];
 
-          formattedMessage = formattedMessage.replace(
-            match[0],
-            `<pre class="bg-slate-800 p-3 rounded"><code class="language-${language} text-white">${highlightedCode}</code></pre>`
-          );
+          if (escapeChar) {
+            escapeChar = false;
+            continue;
+          }
+
+          if (char === "\\") {
+            escapeChar = true;
+            continue;
+          }
+
+          if (char === '"') {
+            inString = !inString;
+            continue;
+          }
+
+          if (!inString) {
+            if (char === "{" || char === "[") {
+              stack.push(char);
+            } else if (char === "}" && stack[stack.length - 1] === "{") {
+              stack.pop();
+            } else if (char === "]" && stack[stack.length - 1] === "[") {
+              stack.pop();
+            }
+          }
         }
 
-        return (
-          <div
-            className="overflow-auto rounded-sm p-2"
-            dangerouslySetInnerHTML={{ __html: formattedMessage }}
-          />
-        );
-      } catch (error) {
-        console.warn("Error formatting code blocks:", error);
+        // Add missing closing characters
+        while (stack.length > 0) {
+          const last = stack.pop();
+          fixed += last === "{" ? "}" : "]";
+        }
+
+        // Fix 2: Remove trailing commas
+        fixed = fixed.replace(/,(?=\s*[}\]])/g, "");
+
+        // Fix 3: Handle unquoted keys
+        fixed = fixed.replace(/([{,]\s*)([a-zA-Z0-9_]+)(\s*:)/g, '$1"$2"$3');
+
+        return JSON.parse(fixed);
+      } catch (finalError) {
+        console.error("Failed to parse even after fixes:", finalError);
+        return null;
       }
     }
+  }
 
-    // Try to parse as JSON for structured responses
-    try {
-      // Check if the message is complete JSON (sometimes it can be partial)
-      let jsonMessage = message;
+  // Improved function to handle AI message display
+  /**
+   * Renders AI messages with proper formatting, automatically converting JSON to readable text
+   * @param {string} message - The AI message content
+   * @returns {JSX.Element} Formatted message component
+   */
+  function WriteAiMessage(message) {
+    // Check if the message appears to be JSON
+    if (
+      typeof message === "string" &&
+      message.trim().startsWith("{") &&
+      message.trim().endsWith("}")
+    ) {
+      try {
+        // Try to parse the JSON
+        const parsedMessage = JSON.parse(message);
 
-      // Attempt to find and extract valid JSON from the message
-      const jsonRegex = /{[\s\S]*}/g;
-      const jsonMatches = message.match(jsonRegex);
-
-      if (jsonMatches && jsonMatches.length > 0) {
-        // Use the first complete JSON object found
-        jsonMessage = jsonMatches[0];
-      }
-
-      const messageObject = JSON.parse(jsonMessage);
-
-      // Handle cppFile, javaFile, or other language files
-      if (messageObject.cppFile) {
-        return (
-          <div className="overflow-auto bg-slate-950 text-white rounded-sm p-2">
-            <div className="mb-2 font-bold">
-              {messageObject.cppFile.filename || "C++ File"}
-            </div>
-            <pre className="whitespace-pre-wrap">
-              <code className="language-cpp">
-                {messageObject.cppFile.fileContent}
-              </code>
-            </pre>
-          </div>
-        );
-      }
-
-      // Handle Java files
-      if (messageObject.javaFile) {
-        return (
-          <div className="overflow-auto bg-slate-950 text-white rounded-sm p-2">
-            <div className="mb-2 font-bold">
-              {messageObject.javaFile.filename || "Java File"}
-            </div>
-            <pre className="whitespace-pre-wrap">
-              <code className="language-java">
-                {messageObject.javaFile.fileContent}
-              </code>
-            </pre>
-          </div>
-        );
-      }
-
-      // Generic file handling
-      const fileTypes = [
-        "cppFile",
-        "javaFile",
-        "cFile",
-        "pyFile",
-        "jsFile",
-        "htmlFile",
-        "cssFile",
-      ];
-      for (const fileType of fileTypes) {
-        if (messageObject[fileType]) {
-          const fileInfo = messageObject[fileType];
-          const language = fileType.replace("File", "");
-
+        // If this is a project ideas response, format it specially
+        if (parsedMessage.projectIdeas) {
           return (
             <div className="overflow-auto bg-slate-950 text-white rounded-sm p-2">
-              <div className="mb-2 font-bold">
-                {fileInfo.filename || `${language.toUpperCase()} File`}
-              </div>
-              <pre className="whitespace-pre-wrap">
-                <code className={`language-${language}`}>
-                  {fileInfo.fileContent}
-                </code>
-              </pre>
+              <h3 className="font-bold mb-2">Project Ideas:</h3>
+              {parsedMessage.projectIdeas.map((project, index) => (
+                <div key={index} className="mb-4">
+                  <h4 className="font-bold text-indigo-300">
+                    {project.projectName}
+                  </h4>
+                  <p className="mb-2">{project.description}</p>
+                  {project.features && (
+                    <>
+                      <div className="mb-1 font-medium">Features:</div>
+                      <ul className="list-disc pl-5">
+                        {project.features.map((feature, idx) => (
+                          <li key={idx}>{feature}</li>
+                        ))}
+                      </ul>
+                    </>
+                  )}
+                  {project.technologies && (
+                    <>
+                      <div className="mb-1 font-medium">Technologies:</div>
+                      <ul className="list-disc pl-5">
+                        {project.technologies.map((tech, idx) => (
+                          <li key={idx}>{tech}</li>
+                        ))}
+                      </ul>
+                    </>
+                  )}
+                </div>
+              ))}
             </div>
           );
         }
-      }
 
-      // Check for projectIdeas
-      if (
-        messageObject.projectIdeas &&
-        Array.isArray(messageObject.projectIdeas)
-      ) {
+        // If it has a text property, use that as the message content
+        if (parsedMessage.text) {
+          return (
+            <div className="overflow-auto bg-slate-950 text-white rounded-sm p-2">
+              <Markdown
+                children={parsedMessage.text}
+                options={{
+                  overrides: {
+                    code: SyntaxHighlightedCode,
+                  },
+                }}
+              />
+            </div>
+          );
+        }
+
+        // For file-related responses
+        if (parsedMessage.fileTree || parsedMessage.files) {
+          return (
+            <div className="overflow-auto bg-slate-950 text-white rounded-sm p-2">
+              <div className="mb-2">The following files have been created:</div>
+              <ul className="list-disc pl-5">
+                {parsedMessage.fileTree &&
+                  Object.keys(parsedMessage.fileTree).map((filename, idx) => (
+                    <li key={idx}>{filename}</li>
+                  ))}
+                {parsedMessage.files &&
+                  parsedMessage.files.map((file, idx) => (
+                    <li key={idx}>{file.name}</li>
+                  ))}
+              </ul>
+              <div className="mt-2">
+                Click on a file in the explorer to view or edit its contents.
+              </div>
+            </div>
+          );
+        }
+
+        // For any other JSON response, convert it to a readable format
         return (
           <div className="overflow-auto bg-slate-950 text-white rounded-sm p-2">
-            <h3 className="font-bold mb-2">Project Ideas:</h3>
-            {messageObject.projectIdeas.map((project, index) => (
-              <div key={index} className="mb-4 border-t border-gray-700 pt-2">
-                <h4 className="font-bold text-blue-300">
-                  {project.projectName}
-                </h4>
-                <p className="mb-2">{project.description}</p>
-
-                {project.technologies && (
-                  <div className="mb-2">
-                    <span className="font-semibold">Technologies: </span>
-                    {project.technologies.join(", ")}
-                  </div>
-                )}
-
-                {project.features && Array.isArray(project.features) && (
-                  <div className="mb-2">
-                    <span className="font-semibold">Features:</span>
-                    <ul className="list-disc pl-5 mt-1">
-                      {project.features.map((feature, idx) => (
-                        <li key={idx}>{feature}</li>
-                      ))}
-                    </ul>
-                  </div>
-                )}
-
-                {project.difficulty && (
-                  <div className="text-sm text-gray-400">
-                    Difficulty: {project.difficulty}
-                  </div>
-                )}
-              </div>
-            ))}
+            {convertJsonToReadableText(parsedMessage)}
+          </div>
+        );
+      } catch (error) {
+        console.warn("Error parsing JSON in AI message:", error);
+        // If JSON parsing fails, render as plain text/markdown
+        return (
+          <div className="overflow-auto bg-slate-950 text-white rounded-sm p-2">
+            <Markdown
+              children={message}
+              options={{
+                overrides: {
+                  code: SyntaxHighlightedCode,
+                },
+              }}
+            />
           </div>
         );
       }
+    }
 
-      // For other structured data, format it nicely
+    // If not JSON, render as markdown
+    return (
+      <div className="overflow-auto bg-slate-950 text-white rounded-sm p-2">
+        <Markdown
+          children={message}
+          options={{
+            overrides: {
+              code: SyntaxHighlightedCode,
+            },
+          }}
+        />
+      </div>
+    );
+  }
+
+  /**
+   * Converts any JSON object to readable text format
+   * @param {Object} jsonObj - The JSON object to convert
+   * @returns {JSX.Element} Formatted JSX representing the JSON data
+   */
+  function convertJsonToReadableText(jsonObj) {
+    // Handle different types of JSON structures
+
+    // If it's an array
+    if (Array.isArray(jsonObj)) {
       return (
-        <div className="overflow-auto bg-slate-950 text-white rounded-sm p-2">
-          <pre className="whitespace-pre-wrap">
-            {JSON.stringify(messageObject, null, 2)}
-          </pre>
-        </div>
-      );
-    } catch (error) {
-      // If JSON parsing fails, treat as markdown
-      return (
-        <div className="overflow-auto bg-slate-950 text-white rounded-sm p-2">
-          <Markdown
-            children={message}
-            options={{
-              overrides: {
-                code: SyntaxHighlightedCode,
-              },
-            }}
-          />
+        <div>
+          {jsonObj.map((item, index) => (
+            <div key={index} className="mb-3">
+              {typeof item === "object"
+                ? convertJsonToReadableText(item)
+                : item}
+            </div>
+          ))}
         </div>
       );
     }
+
+    // If it's an object
+    if (typeof jsonObj === "object" && jsonObj !== null) {
+      // Extract all keys
+      const keys = Object.keys(jsonObj);
+
+      // Check if it's empty
+      if (keys.length === 0) {
+        return <div>Empty object</div>;
+      }
+
+      // Convert each key-value pair
+      return (
+        <div>
+          {keys.map((key) => {
+            // Skip rendering internal properties that start with _
+            if (key.startsWith("_")) return null;
+
+            const value = jsonObj[key];
+
+            // Format the key nicely
+            const formattedKey = key
+              .replace(/([A-Z])/g, " $1") // Add space before capital letters
+              .replace(/^./, (str) => str.toUpperCase()); // Capitalize first letter
+
+            // Handle different value types
+            return (
+              <div key={key} className="mb-2">
+                <div className="font-bold text-indigo-300">{formattedKey}:</div>
+                <div className="pl-4">
+                  {typeof value === "object" ? (
+                    convertJsonToReadableText(value)
+                  ) : (
+                    <div>{String(value)}</div>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      );
+    }
+
+    // For primitive values
+    return <div>{String(jsonObj)}</div>;
   }
 
   // Initialize WebContainer separately to better handle errors
@@ -875,7 +963,8 @@ const Project = () => {
       // Set up message listener
       receiveMessage("project-message", (data) => {
         console.log("Received message:", data);
-        // Create a composite key for the message
+
+        // Create a composite key for the message to avoid duplicates
         const newMessageKey = `${data.sender?._id}-${
           data.timestamp
         }-${data.message?.substring(0, 20)}`;
@@ -894,29 +983,102 @@ const Project = () => {
           console.log("Skipping duplicate message");
           return;
         }
+
         if (data.sender?._id === "ai") {
           try {
+            // Check if user asked for a specific file
+            const lastUserMessage =
+              messages.filter((m) => m.sender?._id !== "ai").pop()?.message ||
+              "";
+            const isSpecificFileRequest = lastUserMessage.match(
+              /@ai\s+(?:give|create|make)\s+(?:me\s+)?(?:a\s+)?(.+?\.[a-z]+)/i
+            );
+
+            if (isSpecificFileRequest) {
+              const requestedFile = isSpecificFileRequest[1].trim();
+              console.log(`User requested specific file: ${requestedFile}`);
+
+              // For simple file requests like hello.js, format the response nicely
+              try {
+                const jsonData = JSON.parse(data.message);
+
+                // If the response is JSON but the user wanted a simple file,
+                // we'll extract the file content and save it to the file tree
+                if (jsonData.file?.contents || jsonData[requestedFile]) {
+                  const fileContent =
+                    jsonData.file?.contents ||
+                    (typeof jsonData[requestedFile] === "string"
+                      ? jsonData[requestedFile]
+                      : jsonData[requestedFile]?.file?.contents);
+
+                  if (fileContent) {
+                    // Create a file tree entry
+                    const newFileTree = {
+                      ...fileTree,
+                      [requestedFile]: {
+                        file: {
+                          contents: fileContent,
+                        },
+                      },
+                    };
+
+                    // Update file tree
+                    setFileTree(newFileTree);
+                    saveFileTree(newFileTree);
+
+                    // Open the file
+                    setCurrentFile(requestedFile);
+                    setOpenFiles((prev) => [
+                      ...new Set([...prev, requestedFile]),
+                    ]);
+
+                    // Format a more user-friendly response message
+                    const formattedMessage = {
+                      ...data,
+                      message: `I've created ${requestedFile} for you. The file has been added to your project and is now open in the editor.`,
+                    };
+
+                    // Add the formatted message instead of the raw JSON
+                    setMessages((prevMessages) => [
+                      ...prevMessages,
+                      formattedMessage,
+                    ]);
+
+                    // Save the message to the database
+                    axiosInstance
+                      .post("/messages/save", {
+                        message: formattedMessage.message,
+                        sender: data.sender,
+                        projectId: projectId,
+                        timestamp: data.timestamp || new Date().toISOString(),
+                      })
+                      .catch((err) => {
+                        console.error(
+                          "Failed to save formatted AI message:",
+                          err
+                        );
+                      });
+
+                    return; // Skip the rest of the processing
+                  }
+                }
+              } catch (e) {
+                console.log("Response is not JSON, processing normally");
+              }
+            }
+
             // Process the AI message to extract file information
             const newFileTree = processAiMessage(data.message);
 
             if (newFileTree && Object.keys(newFileTree).length > 0) {
-              // Merge with existing file tree (keeping existing files)
               const mergedFileTree = { ...fileTree, ...newFileTree };
-
-              // Update the file tree state
               setFileTree(mergedFileTree);
-
-              // Save the updated file tree to the server
               saveFileTree(mergedFileTree);
 
-              // Try to mount the file tree if WebContainer is available
               if (webContainer) {
                 mountFileTreeToContainer(webContainer, mergedFileTree).then(
                   (success) => {
                     if (success) {
-                      console.log("File tree mounted from AI message");
-
-                      // If new files were added, open the first one
                       const newFiles = Object.keys(newFileTree);
                       if (newFiles.length > 0) {
                         setCurrentFile(newFiles[0]);
@@ -951,6 +1113,7 @@ const Project = () => {
             setMessages((prevMessages) => [...prevMessages, data]);
           } catch (error) {
             console.error("Error processing AI message:", error);
+            // Still add the message to chat even if processing failed
             setMessages((prevMessages) => [...prevMessages, data]);
           }
         } else {
