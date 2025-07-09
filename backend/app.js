@@ -12,8 +12,13 @@ connectDb();
 
 const app = express();
 
+const allowedOrigins = [
+  'http://localhost:5173',
+  'https://aicollab-9jul.onrender.com'
+];
+
 app.use(cors({
-  origin: '*',  // or '*' to allow all (not recommended for production)
+  origin: allowedOrigins,
   credentials: true
 }));
 app.use(morgan('dev'));
