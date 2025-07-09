@@ -50,7 +50,7 @@ const Navbar = () => {
       <div className="container mx-auto px-4 md:px-6">
         <div className="flex items-center justify-between">
           <div className="flex items-center">
-            <a href={user ? "/home" : "/"} className="text-2xl font-bold gradient-text">TechSenpai</a>
+            <a href={user ? "/home" : "/"} className="text-2xl font-bold gradient-text">TechnoSenpai</a>
           </div>
 
           {/* Desktop Navigation */}
