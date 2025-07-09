@@ -17,10 +17,17 @@ const allowedOrigins = [
   'https://aicollab-9jul.onrender.com'
 ];
 
+// app.use(cors({
+//   origin: allowedOrigins,
+//   credentials: true
+// }));
 app.use(cors({
-  origin: allowedOrigins,
+  origin: (origin, callback) => {
+    callback(null, origin); // allow all origins dynamically
+  },
   credentials: true
 }));
+
 app.use(morgan('dev'));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
